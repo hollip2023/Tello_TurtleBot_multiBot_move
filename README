@@ -1,8 +1,57 @@
-This project works on jetson and TurtleBot
+The objective of this project is to develop a multi-robot system consisting of a Tello drone and a TurtleBot, where the drone is used to search an area for injured individuals, and the TurtleBot subsequently delivers medical supplies to the identified location, marked by person.
 
+At first glance, the concept appears straightforward, with clearly defined roles for each robot. However, implementing the system on real hardware presented several challenges. Our initial setup involved using a Tello drone and a Raspberry Pi-powered TurtleBot. However, we quickly encountered a limitation: the Raspberry Pi lacks a GPU, making it unsuitable for running convolutional neural networks (CNNs) required for human detection. Without deep learning capabilities, our core objective would be unattainable.
+
+Fortunately, we discovered that the TurtleBot is equipped with a Jetson board,which provides GPU acceleration. However, the Jetson and the Raspberry Pi were not initially connected. After consulting with the teacher, we decided to connect the Jetson to the Raspberry Pi via Ethernet using USB-to-Ethernet adapters. This allowed the Jetson to act as the computational hub for the system, running the CNN models for human detection.
+
+This decision introduced another issue: in order for the Jetson to process images from the Tello drone, it needed a dedicated Wi-Fi connection to the drone. The Jetson already used its built-in Wi-Fi (wlan0) to connect to the Wi-Fi network (TIER) for SSH access. To resolve this, we added a second Wi-Fi adapter to the Jetson, allowing wlan1 to connect to the Tello drone while wlan0 remained connected to the TIER network. Also this multi connection needs to be configured through the IP route table, to make sure the data to Tello is going through WLAN1, and the data to Turtle Bot is going through ETH0.
+Final Hardware Setup:
+    1. Tello Drone connects via Wi-Fi to Jetson wlan1
+    2. Jetson uses wlan0 to connect to Wi-Fi TIER (for SSH access from a PC)
+    3. Jetson eth0 connects to Raspberry Pi eth0 (via USB-to-Ethernet adapters)
+    4. Raspberry Pi wlan0 connects to Wi-Fi TIER (for SSH access)
+    5. Laptop connects to Wi-Fi TIER to remotely access both Jetson and Raspberry Pi via SSH
+    
+System Setup and Problem Solving:
+After completing the hardware setup, we encountered several challenges during the integration and configuration of the system. Below is a summary of the key problems and how we resolved them.
+1. Accessing the Jetson Module
+The first issue was the lack of access credentials for the Jetson module. Initially, we were only able to interact with it through a running Jupyter web server hosted on the Jetson, which allowed limited command execution. Eventually, we managed to retrieve the correct username and password, enabling full SSH access and system control.
+2. Wi-Fi Adapter Connectivity Issue
+The second major problem involved the Jetson’s secondary Wi-Fi interface (wlan1), which was unable to connect to the Tello drone. At first, we suspected that the Jetson hardware lacked the necessary kernel support for the USB Wi-Fi adapter. After reviewing kernel logs via dmesg, we found that the adapter was not being recognized at all, suggesting a hardware failure. Fortunately, we had a backup Wi-Fi adapter on hand, which worked immediately upon connection, resolving the issue.
+
+3. ROS 2 Version Incompatibility
+Another challenge arose due to version mismatches between the ROS 2 installations on the TurtleBot and the Tello drone. To address this, we implemented a communication bridge between the Jetson and the TurtleBot. The Jetson was set up with the same ROS 2 version as the Tello, while an intermediate layer was created to translate and forward messages to the TurtleBot, effectively bypassing the version compatibility issue. (But eventually we didn't use ROS2 with Tello, because there was a problem with Tello driver)
+
+4. Tello Driver Compatibility on Jetson
+Our next goal was to run the TIER Tello ROS 2 driver on the Jetson. However, the driver assumes an x86_64 architecture with a graphical user interface (GUI), while the Jetson runs headless Ubuntu 20.04 on ARM architecture. Since OpenCV GUI APIs were used to display live video feeds, we modified the driver by commenting out the GUI-related code. Despite these changes, we encountered further issues with video decoding and missing dependencies.
+
+Because the Jetson’s system and other critical applications also rely on OpenCV, we could not safely recompile or install a new version without risking system stability. To avoid this, we opted to use the official Tello Python library, DJITelloPy, from GitHub. This library allowed us to establish communication with the Tello drone and successfully retrieve image streams and send control commands directly from the Jetson.
+
+5. Controlling the TurtleBot via Jetson
+Once the Tello control pipeline was functional, we focused on controlling the TurtleBot from the Jetson. We established a UDP connection between the Jetson and the Raspberry Pi on the TurtleBot to send motion commands. On the TurtleBot side, we created a ROS 2 publisher node that publishes to the topic /tb4_08/cmd_vel. This node receives velocity commands (x for forward motion and z for angular velocity) via UDP from the Jetson.
+
+To ensure safety and precise control, we implemented a 0.5-second timer that stops the TurtleBot if no new command is received within that interval. This prevents unintended movement in case of communication dropouts.
+
+6. Wi-Fi connection issue
+During testing, one recurring inefficiency was the need to manually connect the Jetson’s secondary Wi-Fi interface to the Tello drone’s Wi-Fi network before each session. This repetitive task significantly slowed down the development workflow.
+To streamline the process, we automated the Wi-Fi connection by encapsulating the necessary commands into a shell script. This script ensures that the Jetson automatically connects to the Tello’s Wi-Fi network each time we initiate a test session. As a result, setup time is reduced and testing becomes more efficient and reliable.
+Multi-Robot Navigation and Coordination:
+Following the successful setup of communication and control with both the Tello drone and the TurtleBot, our next objective was to implement coordinated navigation. The goal was to have the Tello drone search a designated area for a human target, and upon successful detection, guide the TurtleBot to that location to deliver assistance.
+
+Location Estimation and Navigation Strategy. Initially, our approach involved having the Tello drone autonomously fly and search the area. If a person was detected, the TurtleBot would navigate to the estimated position of the drone for the rescue task. However, this proved difficult because the Tello drone lacks GPS capabilities. To overcome this, we experimented with step-based dead reckoning—estimating the drone's position by calculating distance based on movement commands. Unfortunately, the estimation errors increased significantly over longer distances, making this method unreliable. To simplify the navigation problem within the limitations of our hardware, we adopted a revised approach: Predefined target locations were specified before each mission. Both the drone and the TurtleBot were directed to move to these coordinates. Once in the search area, the Tello drone conducted human detection, and if a person was found, it would track the person’s movement continuously, enabling the TurtleBot to follow and assist accordingly. In a real-world deployment, GPS would provide a far more accurate and scalable solution. However, in our setup, predefined coordinates served as a practical workaround.
+
+Parallel Processing for Smoother Operation. All image processing was performed on the Jetson module. Initially, we implemented a sequential pipeline where Tello and TurtleBot images were processed alternately. After each detection cycle, control commands were sent to the respective robot. This approach resulted in poor performance, as it forced one robot to wait for the other: The TurtleBot, being slower, caused the drone to pause frequently. The Tello’s blocking API calls further delayed the control loop.To improve concurrency and responsiveness, we implemented a multi-threaded control architecture: A dedicated thread was assigned to each robot (Tello and TurtleBot). A thread-safe lock mechanism was introduced to coordinate access to the Jetson’s neural network for image detection. This allowed both robots to move and respond to detections simultaneously, greatly improving system fluidity and real-time responsiveness.
+
+To enhance the robustness and smoothness of the system, we performed a final round of parameter tuning and behavior optimization. This involved adjustments across several key components. Movement Step Sizes: We adjusted the motion step size for both the Tello drone and the TurtleBot to achieve smoother navigation. Smaller, more controlled movements improved precision during tracking and overshooting near the target.
+
+Once the Tello drone and TurtleBot reached the target area and successfully detected a human, both robots entered a human-following mode. To ensure safety and maintain an appropriate distance from the person. We analyzed the horizontal ratio of the human’s bounding box within the image frame to estimate proximity. If the human appeared too large in the frame (indicating close distance), both robots slowed down or stopped to avoid getting too close or causing accidental contact.
+
+This visual feedback loop enabled dynamic, human-aware navigation without relying on depth sensors or GPS. It provided a practical safety mechanism suitable for our hardware constraints environment.
+
+How to run the code:
 1. downlaod "drone_connect.sh", main.py" to jetson
 2. modify this line: connect_tello_wifi("TELLO-5C28D8"), replace the Tello SSID
-3. run main.py with root
+3. run main.py with root(if the wifi is connected but drone can not be pinged, check the ip route table, add the ip of 192.168.10.1 gateway of the wlan1 that connects to Tello)
 
 4. download "remote_move.py" to turtlebot
 5. run this python(no root required)
