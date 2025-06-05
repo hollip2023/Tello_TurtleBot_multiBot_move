@@ -1,0 +1,8 @@
+This project works on jetson and TurtleBot
+
+1. downlaod "drone_connect.sh", main.py" to jetson
+2. modify this line: connect_tello_wifi("TELLO-5C28D8"), replace the Tello SSID
+3. run main.py with root
+
+4. download "remote_move.py" to turtlebot
+5. run this python(no root required)
